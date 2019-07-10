@@ -1,0 +1,307 @@
+# You must import sys to be able to convert the arguments
+# tickers must be specified as below as must the frequency (in seconds)
+# Everything is case sensitive
+
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+import sys
+
+# write error messages (if any) to file
+stdout = sys.stdout
+sys.stdout = open('C:/Users/Kaya/Desktop/Trading/null.txt', 'w')
+stderr = sys.stderr
+sys.stderr = open('C:/Users/Kaya/Desktop/Trading/null.txt', 'w')
+
+import numpy
+import pandas as pd
+import sklearn as sk
+#import matplotlib.pyplot as plt
+import tensorflow
+import keras
+from sklearn import preprocessing
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.layers import LSTM
+from keras.layers import Dropout
+
+# calculate number of shares to long
+def calculateLong(cash, bid):
+    return (0.5*cash)/bid
+
+# calculate number of shares to short
+def calculateShort(cash, ask):
+    return 0.7*cash/ask
+
+# create a record in a txt file to record number of trades performed for the ticker
+def createNumTrades(path, tkr):
+
+	f = open(path+'numTrades_'+tkr+'.txt', 'w+')
+	f.write('0')
+	f.close()
+
+# read number of trades for all tickers from file
+def readNumTrades(path, tkr_list, numTrades):
+
+	for tkr in tkr_list:
+		f = open(path+'numTrades_'+tkr+'.txt', 'r')
+		numTrades[tkr] = int(f.readline())
+		f.close()
+
+# update the number of trades for the ticker
+def updateNumTrades(path, tkr):
+
+	f = open(path+'numTrades_'+tkr+'.txt', 'r')
+	line = f.readline()
+	numTrades = int(line)
+	f.close()
+	f = open(path+'numTrades_'+tkr+'.txt', 'w')
+	f.write(str(numTrades+1))
+	f.close()
+
+def convertFloat(string_litereal):
+	
+	if string_litereal.count('.') > 1:
+		str_list = string_litereal.split('.', 2)
+		return str_list[0]
+	else:
+		return string_litereal
+
+
+
+tickers=['QQQ','SPY']
+# frequency of trade - per minute
+frequency=60
+# path='C:/Users/aimalik/Desktop/data/'
+path = 'C:/Users/Kaya/Desktop/Trading/'
+
+
+# The next part converts the arguments into variables that are easier to use
+# the arguments are passed as follows:
+# argv[0] is the name of your python file
+# argv[1] is the number of arguments per ticker, as explained below
+# then comes the data for the first ticker: bid, ask, last, q0,q2,...,
+# In the current implementation, 
+#	last=last traded price
+#	q0=cash quantity
+#	q1=margin quantity
+#	q2=short quantity
+#	q3=cash available (in the currency that the ticker trades in)
+#	q4=VWAP of your position
+#	q5=transaction cost per trade
+#	note that there are 7 elements of the quantity, numbered 0 to 6
+# this is followed by the data for the second ticker
+# the next part converts the arguments into last prices and position data by ticker
+
+# the first is the number of arguments per ticker
+nArg=int(sys.argv[1])
+# in the future, we may pass more arguments per ticker; that is why we made this variable
+
+i=1
+bid=dict()
+ask=dict()
+last=dict()
+qty=dict()
+for tkr in tickers:
+	i=i+1
+	bid[tkr]=float(sys.argv[i])
+	i=i+1
+	ask[tkr]=float(sys.argv[i])
+	i=i+1
+	last[tkr]=float(sys.argv[i])
+	qty[tkr]=list()
+	for j in range(nArg):
+		i=i+1
+		qty[tkr].append(float(sys.argv[i]))
+
+# the following 'constant' declarations refer to the different parts of qty for nArgs=7 (the current implementation)
+
+cCashQty=0
+cMarginQty=1
+cShortQty=2
+cCashAvailable=3
+cCVAP=4
+cTransCost=5
+
+# the trades are returned in a dictionary called returnString.
+returnString=dict()
+
+for i in tickers:
+
+	returnString[i] = 'blank'
+# each element of returnString is a key-value pair of the format returnString[ticker]=action/qty
+# action is one of: cashbuy cashsell marginbuy marginsell shortsale shortcover 
+# qty is a number. 
+# Example: returnString['IBM']="cashbuy/10" means exactly what it says: buy 10 shares for cash. 
+# any order that is valid will be executed.  
+# So if you have cashbuy orders for multiple securities, they will all be executed at once. 
+# This allows you to trade baskets of securities. 
+
+# You can develop any trading strategy you like.  Your Python script can download data, 
+# and use any algorithm you like.
+# IMPORTANT NOTE: if you use Python packages, make sure that your Windows PATH is set correctly.
+# See https://docs.python.org/3/using/windows.html for help on installing Python correctly and setting the PATH.
+ 
+# You can test your script without trading from the FTS Real Time Client. 
+
+# start of by allocating variables for the Strategy.  
+
+tkr_files = dict()
+# update the latest price data into the txt files
+for i in tickers:
+	tkr_files[i] = open(path+i+'.txt', 'a+')
+
+	tkr_files[i].write(str(bid[i])+','+str(ask[i])+','+str(last[i])+'\n')
+
+	tkr_files[i].close()
+
+
+#generate data to use:
+
+data = dict()
+tkr_files = dict()
+
+# read data from files and store them in the program
+for i in tickers:
+
+	data[i] = dict()
+	data[i]['bid'] = []
+	data[i]['ask'] = []
+	data[i]['last'] = []
+
+	tkr_files[i] = open(path+i+'.txt', 'r')
+
+	lines = tkr_files[i].readlines()
+
+	if len(lines) <= 1:
+		createNumTrades(path, i)
+
+	for line in lines:
+
+		line_list = line.split(',')
+
+		data[i]['bid'].append(float(convertFloat(line_list[0])))
+		data[i]['ask'].append(float(convertFloat(line_list[1])))
+		data[i]['last'].append(float(convertFloat(line_list[2])))
+
+#start strategy
+
+numTrades = dict()
+readNumTrades(path, tickers, numTrades)
+
+numShares = dict()
+
+numData = len(data[tickers[0]]['bid'])
+cashAvailable = qty[tickers[0]][cCashAvailable]
+
+# training data length is the number of data we use to train the model each time
+trainigDataLength = 300
+# training set length is the number of predictors we have in each sample
+# the predictors are lagged prices of the traded ticker and another ticker that is co-integrated
+# in this case, training set length = 15 means we have 2 tickers * 15 lags = 30 predictors
+trainigSetLength =15
+
+trainigData = dict()
+training_set_scaled = dict()
+
+for i in range(len(tickers)):
+
+	trainigData[tickers[i]] = []
+
+	if numData >= trainigDataLength: # if we have enough samples
+		# take the latest data points (length of data points = training data length)
+		for j in range(numData - trainigDataLength, numData):
+			trainigData[tickers[i]].append(data[tickers[i]]['last'][j])
+		#trainigData[tickers[i]].append(data[tickers[i]]['last'][numData - trainigDataLength:numData])
+		# scale the data using MinMaxScaler function
+		sc = preprocessing.MinMaxScaler(feature_range=(0, 1))
+		training_set_scaled[tickers[i]] = sc.fit_transform([trainigData[tickers[i]]])
+		x_train = []
+		y_train = []
+
+		if i % 2 == 1: # we will trade only the second asset
+
+			for k in range(trainigSetLength, trainigDataLength):
+				# x_train stores the predictors.
+				# there will be 2 * training set length predictors each row, which corresponds to one sample
+				x_train.append(numpy.concatenate((training_set_scaled[tickers[i - 1]][0][k - trainigSetLength:k],\
+							   training_set_scaled[tickers[i]][0][k - trainigSetLength:k]),axis=None))
+				# y_train is the predicted variable, the stock price in the following day
+				y_train.append(training_set_scaled[tickers[i]][0][k])
+
+			x_train = numpy.array(x_train)
+			y_train = numpy.array(y_train)
+			# reshape the arrays so that it could be used in building neural network models
+			x_train = numpy.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
+
+			# building neural networks
+			regressor = Sequential()
+			regressor.add(LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], 1)))
+			regressor.add(Dropout(0.2))
+			regressor.add(LSTM(units=50, return_sequences=True))
+			regressor.add(Dropout(0.2))
+			regressor.add(LSTM(units=50, return_sequences=True))
+			regressor.add(Dropout(0.2))
+			regressor.add(LSTM(units=50))
+			regressor.add(Dropout(0.2))
+			regressor.add(Dense(units=1))
+			regressor.compile(optimizer='adam', loss='mean_squared_error')
+
+			regressor.fit(x_train, y_train, epochs=3, batch_size=20)
+
+			# get last (training set length * 2) elements, which is the predictors for next stock prices
+			x_test = numpy.array([numpy.concatenate((trainigData[tickers[i - 1]][-trainigSetLength:],\
+									   trainigData[tickers[i]][-trainigSetLength:]),axis=None)])
+			x_test = numpy.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
+			# use the latest predictors to predict the next price
+			predicted_price = regressor.predict(x_test)
+			predicted_price = predicted_price[0][0]
+
+			#current_price = last[tickers[i]]
+			# current price is the scaled last available price
+			current_price = training_set_scaled[tickers[i]][-1][0]
+
+			# if we have not performed any trades before
+			if numTrades[tickers[i]] == 0:
+				# if current (last) price is smaller than predicted, we should long the share because it is predicted to grow
+				if current_price < predicted_price:
+
+					numShares[tickers[i]] = calculateLong(cashAvailable, ask[tickers[i]])
+					returnString[tickers[i]] = "cashbuy/" + str(int(numShares[tickers[i]]))
+
+				else:
+				# else if current price is higher than predicted, short the shares because it has been overvalued.
+					numShares[tickers[i]] = calculateShort(cashAvailable, bid[tickers[i]])
+					returnString[tickers[i]] = "shortsale/" + str(int(numShares[tickers[i]]))
+
+			else: # if we have performed trades previously
+				# if current price is lower than predicted and we are not holding the shares, then long the shares
+				if (current_price < predicted_price) and (qty[tickers[i]][cCashQty] == 0):
+
+					numShares[tickers[i]] = calculateLong(cashAvailable, ask[tickers[i]])
+					returnString[tickers[i]] = "cashbuy/" + str(int(numShares[tickers[i]]))
+
+				# if current price is greater than predicted price and we have not shorted the shares previously, short the shares
+				elif (current_price > predicted_price) and (qty[tickers[i]][cShortQty] == 0):
+
+					numShares[tickers[i]] = calculateShort(cashAvailable, bid[tickers[i]])
+					returnString[tickers[i]] = "shortsale/" + str(int(numShares[tickers[i]]))
+
+				# if current price is higher than predicted and we are currently holding the shares, sell them.
+				elif (current_price > predicted_price) and (qty[tickers[i]][cCashQty] > 0):
+
+					returnString[tickers[i]] = "cashsell/" + str(int(qty[tickers[i]][cCashQty]))
+
+				# if current price is lower than predicted, and we are shorting the shares, then cover the short position.
+				elif (current_price < predicted_price) and (qty[tickers[i]][cShortQty] > 0):
+
+					returnString[tickers[i]] = "shortcover/" + str(int(qty[tickers[i]][cShortQty]))
+					
+	if returnString[tickers[i]] != "blank":
+		updateNumTrades(path,tickers[i])
+
+
+sys.stdout = stdout
+sys.stderr = stderr
+
+print(returnString)
